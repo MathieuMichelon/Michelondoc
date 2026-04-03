@@ -110,6 +110,13 @@ def format_datetime_value(value) -> str:
 
 
 class FileOps:
+    STAMP_BASE_WIDTH = 150.0
+    STAMP_BASE_HEIGHT = 64.0
+    STAMP_MIN_WIDTH = 120.0
+    STAMP_MAX_WIDTH = 190.0
+    STAMP_MIN_MARGIN = 6.0
+    STAMP_MAX_MARGIN = 24.0
+
     @staticmethod
     def unique_path(folder: Path, preferred_name: str, suffix: str | None = None) -> Path:
         preferred_name = preferred_name.strip()
@@ -463,6 +470,53 @@ class FileOps:
                 pass
 
     @staticmethod
+    def _clamp(value: float, low: float, high: float) -> float:
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _compute_piece_stamp_layout(visible: fitz.Rect) -> dict[str, fitz.Rect | float]:
+        """
+        Calcule un cachet stable en taille "physique" (points PDF) avec bornes,
+        puis l'adapte à la page pour garantir qu'il reste entièrement visible.
+        """
+        base_scale = min(visible.width, visible.height) / A4_WIDTH
+        box_w = FileOps._clamp(
+            FileOps.STAMP_BASE_WIDTH * base_scale,
+            FileOps.STAMP_MIN_WIDTH,
+            FileOps.STAMP_MAX_WIDTH,
+        )
+        box_h = box_w * (FileOps.STAMP_BASE_HEIGHT / FileOps.STAMP_BASE_WIDTH)
+
+        margin = FileOps._clamp(box_w * 0.12, FileOps.STAMP_MIN_MARGIN, FileOps.STAMP_MAX_MARGIN)
+        max_w = max(visible.width - (2 * FileOps.STAMP_MIN_MARGIN), 32.0)
+        max_h = max(visible.height - (2 * FileOps.STAMP_MIN_MARGIN), 24.0)
+        box_w = min(box_w, max_w)
+        box_h = min(box_h, max_h * 0.45)
+
+        x1 = visible.width - margin
+        x0 = max(FileOps.STAMP_MIN_MARGIN, x1 - box_w)
+        y0 = margin
+        y1 = min(visible.height - FileOps.STAMP_MIN_MARGIN, y0 + box_h)
+
+        outer = fitz.Rect(x0, y0, x1, y1)
+        inner = fitz.Rect(x0 + 2, y0 + 2, x1 - 2, y1 - 2)
+        title_box = fitz.Rect(x0 + 8, y0 + 7, x1 - 8, y0 + (outer.height * 0.45))
+        piece_box = fitz.Rect(x0 + 8, y0 + (outer.height * 0.40), x1 - 8, y1 - 7)
+
+        title_font = FileOps._clamp(outer.height * 0.23, 9.0, 13.0)
+        piece_font = FileOps._clamp(outer.height * 0.20, 8.5, 12.0)
+
+        return {
+            "outer": outer,
+            "inner": inner,
+            "title_box": title_box,
+            "piece_box": piece_box,
+            "title_font": title_font,
+            "piece_font": piece_font,
+            "margin": margin,
+        }
+
+    @staticmethod
     def add_page_numbers(src: Path, dst: Path) -> Path:
         doc = fitz.open(str(src))
         FileOps._normalize_page_rotations_in_doc(doc)
@@ -494,27 +548,19 @@ class FileOps:
 
         for page in doc:
             visible = page.rect
-            box_w = 150
-            box_h = 64
-            margin_top = 18
-            margin_right = 18
-            x0 = visible.width - margin_right - box_w
-            y0 = margin_top
-            x1 = visible.width - margin_right
-            y1 = margin_top + box_h
-
-            outer = FileOps._visible_rect_to_page_rect(page, fitz.Rect(x0, y0, x1, y1))
-            inner = FileOps._visible_rect_to_page_rect(page, fitz.Rect(x0 + 2, y0 + 2, x1 - 2, y1 - 2))
+            layout = FileOps._compute_piece_stamp_layout(visible)
+            outer = FileOps._visible_rect_to_page_rect(page, layout["outer"])
+            inner = FileOps._visible_rect_to_page_rect(page, layout["inner"])
             page.draw_rect(outer, color=border_color, width=0.9, overlay=True)
             page.draw_rect(inner, color=border_color, width=0.4, overlay=True)
 
-            title_box = FileOps._visible_rect_to_page_rect(page, fitz.Rect(x0 + 8, y0 + 8, x1 - 8, y0 + 30))
-            piece_box = FileOps._visible_rect_to_page_rect(page, fitz.Rect(x0 + 8, y0 + 28, x1 - 8, y1 - 8))
+            title_box = FileOps._visible_rect_to_page_rect(page, layout["title_box"])
+            piece_box = FileOps._visible_rect_to_page_rect(page, layout["piece_box"])
 
             page.insert_textbox(
                 title_box,
                 title,
-                fontsize=12,
+                fontsize=layout["title_font"],
                 fontname="Times-Bold",
                 color=text_color,
                 align=fitz.TEXT_ALIGN_CENTER,
@@ -523,7 +569,7 @@ class FileOps:
             page.insert_textbox(
                 piece_box,
                 f"Pièce n° : {piece_label}",
-                fontsize=11,
+                fontsize=layout["piece_font"],
                 fontname="Times-Roman",
                 color=text_color,
                 align=fitz.TEXT_ALIGN_CENTER,
